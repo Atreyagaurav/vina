@@ -1,0 +1,19 @@
+* Introduction
+Vina is a tool for monitoring progress for independent processes. The processes can be running from anywhere as long as they can report the progress to the monitoring vina instance. Currently the plan is to use dbus to send/receive reports. In future there are plans to support other methods like sockets/local network support.
+
+* Current Status of Development
+Pre-prototype. Still learning rust and making components bit by bit.
+
+* Use cases
+Monitoring of parallel processes, how many completed, what's the progress of currently running jobs etc.
+
+* Inspiration for Name
+There are multiple inspiration for this name:
+- Vinata is the mother of Aruna and Garuda. Garuda is the messengers of gods, hence the one who gave birth to the messenger,
+- Vina is an musical instrument carried by Narada, a travelling musician and storyteller, who carries news. He is also referred to as Rishiraja, meaning the king of all sages. He was gifted with the boon of knowledge regarding the past, present, and the future. 
+
+  Both inspiration came from what I want this program to be: a tool to pass messages from processes and monitor their progress in real time.
+
+
+* History
+Used Rust to recreate the functionality of the c program [[https://github.com/Atreyagaurav/dmon][dmon]]. Hoping things would be easier to handle in rust.
