@@ -19,10 +19,22 @@ struct Cli {
     /// Match Pattern as Regex Expression
     #[clap(short, long, default_value = r"(\w+) *: *(\d+)%?")]
     pattern: String,
+    /// Dbus path to send the signal
+    #[clap(short, long, default_value="")]
+    dbus_path: String,
+    /// Do not print anything
+    #[clap(short, long, action)]
+    quiet: bool,		// not implemented
 }
 
 fn main() {
     let args = Cli::parse();
+
+    if !args.dbus_path.is_empty() {
+	// open Dbus connection here.
+	println!("Reporting to: {}", args.dbus_path);
+    }
+    
     let sty = ProgressStyle::default_bar().template(&format!(
         "{}{}{}{}{}",
         "{prefix:",
