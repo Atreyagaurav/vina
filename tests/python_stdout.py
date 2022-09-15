@@ -16,12 +16,8 @@ def main():
     for i in range(110):
         if i == 50:
             time.sleep(1)
-        print(f"Testing: {i}", flush=True)
-        # with open("./.log", "a") as w:
-        #     w.write(f"Testing: {i}\n")
-    for i in range(110):
+        print(f"Nice: {i}", flush=True)
         print(f"What: {i//2}", flush=True)
-
     time.sleep(3)
 
 

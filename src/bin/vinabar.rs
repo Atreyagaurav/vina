@@ -4,7 +4,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -20,32 +19,33 @@ struct Cli {
     #[clap(short, long, default_value = r"(\w+) *: *(\d+)%?")]
     pattern: String,
     /// Dbus path to send the signal
-    #[clap(short, long, default_value="")]
+    #[clap(short, long, default_value = "")]
     dbus_path: String,
     /// Do not print anything
     #[clap(short, long, action)]
-    quiet: bool,		// not implemented
+    quiet: bool, // not implemented
 }
 
 fn main() {
     let args = Cli::parse();
 
     if !args.dbus_path.is_empty() {
-	// open Dbus connection here.
-	println!("Reporting to: {}", args.dbus_path);
+        // open Dbus connection here.
+        println!("Reporting to: {}", args.dbus_path);
     }
-    
-    let sty = ProgressStyle::default_bar().template(&format!(
-        "{}{}{}{}{}",
-        "{prefix:",
-        args.name_len,
-        "} [{percent:>3.green}] {bar:",
-        args.length,
-        "} {pos:>7}/{len:7} {eta} {msg}"
-    ));
 
-    // Arc probably isn't needed. idk.
-    let multi_bars = Arc::new(indicatif::MultiProgress::new());
+    let sty = ProgressStyle::default_bar()
+        .template(&format!(
+            "{}{}{}{}{}",
+            "{prefix:",
+            args.name_len,
+            "} [{percent:>3.green}] {bar:",
+            args.length,
+            "} {pos:>7}/{len:7} {eta} {msg}"
+        ))
+        .unwrap();
+
+    let multi_bars = indicatif::MultiProgress::new();
     let mut bars_map: HashMap<String, ProgressBar> = HashMap::new();
     let mut pbar: &ProgressBar;
 
@@ -72,12 +72,12 @@ fn main() {
         }
 
         if !bars_map.contains_key(&label) {
-            let pb = ProgressBar::new(100);
+            let pb = multi_bars.add(ProgressBar::new(100));
             pb.set_style(sty.clone());
             pb.set_prefix(label.clone());
-            bars_map.insert(label.clone(), pb.to_owned());
+            pb.tick();
+            bars_map.insert(label.clone(), pb);
         }
-
         pbar = bars_map.get(&label).unwrap();
         pbar.set_position(perc);
         if perc >= 100 {
@@ -91,10 +91,9 @@ fn main() {
 
     now = Local::now();
     for pb in bars_map.values() {
-        // set message will only work on non finished ones.
-        pb.set_message(format!("Abandoned {}", now.format("%m/%d %H:%M:%S")));
-        pb.abandon();
+        if !pb.is_finished() {
+            pb.set_message(format!("Abandoned {}", now.format("%m/%d %H:%M:%S")));
+            pb.abandon();
+        }
     }
-
-    multi_bars.join().unwrap();
 }

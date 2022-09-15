@@ -23,10 +23,12 @@ fn main() {
     let args: Cli = Cli::parse();
     println!("Waiting Signals on: {}", &args.path);
     let m = Arc::new(MultiProgress::new());
-    let sty = ProgressStyle::default_bar().template(&format!(
-        "{}{}{}",
-        "{prefix:10} [{percent:>3.green}] {bar:", args.length, "} {pos:>7}/{len:7} {eta} {msg}"
-    ));
+    let sty = ProgressStyle::default_bar()
+        .template(&format!(
+            "{}{}{}",
+            "{prefix:10} [{percent:>3.green}] {bar:", args.length, "} {pos:>7}/{len:7} {eta} {msg}"
+        ))
+        .unwrap();
 
     let pb = m.add(ProgressBar::new(args.process_count));
     pb.set_style(sty.clone());
@@ -52,6 +54,4 @@ fn main() {
         let now = Local::now();
         pb.finish_with_message(format!("done {}", now.format("%m/%d %H:%M:%S")));
     });
-
-    m.join().unwrap();
 }
