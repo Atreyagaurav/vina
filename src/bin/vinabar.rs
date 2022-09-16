@@ -2,6 +2,7 @@ use chrono::Local;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
+use rustbus::{connection::Timeout, get_session_bus_path, DuplexConn, MessageBuilder};
 use std::collections::HashMap;
 use std::io;
 use std::thread;
@@ -28,10 +29,15 @@ struct Cli {
 
 fn main() {
     let args = Cli::parse();
-
+    let mut con: Option<DuplexConn> = None;
     if !args.dbus_path.is_empty() {
         // open Dbus connection here.
         println!("Reporting to: {}", args.dbus_path);
+        let session_path = get_session_bus_path().unwrap();
+        let mut c = DuplexConn::connect_to_bus(session_path, true).unwrap();
+        // Dont forget to send the obligatory hello message. send_hello wraps the call and parses the response for convenience.
+        let _unique_name: String = c.send_hello(Timeout::Infinite).unwrap();
+        con = Some(c);
     }
 
     let sty = ProgressStyle::default_bar()
@@ -46,8 +52,8 @@ fn main() {
         .unwrap();
 
     let multi_bars = indicatif::MultiProgress::new();
-    let mut bars_map: HashMap<String, ProgressBar> = HashMap::new();
-    let mut pbar: &ProgressBar;
+    let mut bars_map: HashMap<String, (u32, ProgressBar)> = HashMap::new();
+    let mut pbar: &(u32, ProgressBar);
 
     let mut label = String::from("");
     let mut perc: u64 = 0;
@@ -55,6 +61,7 @@ fn main() {
     let mut now;
     let mut input_line = String::new();
     let re = Regex::new(&args.pattern).unwrap();
+    let mut max_id: u32 = 0;
     loop {
         let bytes = match io::stdin().read_line(&mut input_line) {
             Ok(i) => i,
@@ -76,13 +83,25 @@ fn main() {
             pb.set_style(sty.clone());
             pb.set_prefix(label.clone());
             pb.tick();
-            bars_map.insert(label.clone(), pb);
+            bars_map.insert(label.clone(), (max_id, pb));
+            max_id += 1;
         }
         pbar = bars_map.get(&label).unwrap();
-        pbar.set_position(perc);
+        pbar.1.set_position(perc);
         if perc >= 100 {
             now = Local::now();
-            pbar.finish_with_message(format!("Done {}", now.format("%m/%d %H:%M:%S")));
+            pbar.1
+                .finish_with_message(format!("Done {}", now.format("%m/%d %H:%M:%S")));
+        }
+        match con {
+            Some(ref mut c) => {
+                let mut sig = MessageBuilder::new()
+                    .signal("dmon.Type", "Report", &args.dbus_path)
+                    .build();
+                sig.body.push_param3(&label, pbar.0, &perc).unwrap();
+                c.send.send_message(&sig).unwrap().write_all().unwrap();
+            }
+            None => (),
         }
 
         input_line.clear();
@@ -91,9 +110,9 @@ fn main() {
 
     now = Local::now();
     for pb in bars_map.values() {
-        if !pb.is_finished() {
-            pb.set_message(format!("Abandoned {}", now.format("%m/%d %H:%M:%S")));
-            pb.abandon();
+        if !pb.1.is_finished() {
+            pb.1.set_message(format!("Abandoned {}", now.format("%m/%d %H:%M:%S")));
+            pb.1.abandon();
         }
     }
 }
