@@ -56,7 +56,7 @@ fn main() {
     let mut pbar: &(u32, ProgressBar);
 
     let mut label = String::from("");
-    let mut perc: u64 = 0;
+    let mut perc: u8 = 0;
 
     let mut now;
     let mut input_line = String::new();
@@ -87,7 +87,7 @@ fn main() {
             max_id += 1;
         }
         pbar = bars_map.get(&label).unwrap();
-        pbar.1.set_position(perc);
+        pbar.1.set_position(perc as u64);
         if perc >= 100 {
             now = Local::now();
             pbar.1
