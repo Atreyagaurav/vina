@@ -15,9 +15,9 @@ struct Cli {
     length: u64,
     /// Length of Process Name
     #[clap(short, long, default_value_t = 12)]
-    name_len: u64,
+    name_len: usize,
     /// Match Pattern as Regex Expression
-    #[clap(short, long, default_value = r"(\w+) *: *(\d+)%?")]
+    #[clap(short, long, default_value = r"([A-Za-z -]+) *: *(\d+)%?")]
     pattern: String,
     /// Dbus path to send the signal
     #[clap(short, long, default_value = "")]
@@ -71,6 +71,9 @@ fn main() {
             // EOF
             break;
         }
+        if !re.is_match(&input_line) {
+            continue;
+        }
         for cap in re.captures_iter(&input_line) {
             label = cap[1].to_string();
             perc = cap[2]
@@ -81,7 +84,12 @@ fn main() {
         if !bars_map.contains_key(&label) {
             let pb = multi_bars.add(ProgressBar::new(100));
             pb.set_style(sty.clone());
-            pb.set_prefix(label.clone());
+            // label.truncate(args.name_len)
+            if label.len() > args.name_len {
+                pb.set_prefix(format!("{}..", &label[0..args.name_len - 2]));
+            } else {
+                pb.set_prefix(label.clone());
+            }
             pb.tick();
             bars_map.insert(label.clone(), (max_id, pb));
             max_id += 1;
