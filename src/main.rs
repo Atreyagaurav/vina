@@ -17,9 +17,9 @@ struct Cli {
     length: u64,
     /// Length of Process Name
     #[clap(short, long, default_value_t = 12)]
-    name_len: u64,
+    name_len: usize,
     /// Match Pattern as Regex Expression
-    #[clap(short, long, default_value = r"^(\w+) *: *(\d+)%?")]
+    #[clap(short, long, default_value = r"^([^:]+) *: *(\d+)%?")]
     pattern: String,
     /// Dbus path to send the signal
     #[clap(short, long, default_value = "")]
@@ -27,7 +27,10 @@ struct Cli {
     /// Receive the dbus signal and print it
     #[clap(short, long)]
     receive: bool,
-    /// Show pid of the signal's origin
+    /// Filter the received dbus signals to matched labels
+    #[clap(short, long, default_value = ".*")]
+    filter: String,
+    /// Show pid of the received signal's origin
     #[clap(short, long)]
     id: bool,
     /// Do not print anything
@@ -116,6 +119,11 @@ fn main() {
             // EOF
             break;
         }
+
+        if !re.is_match(&input_line) {
+            continue;
+        }
+
         for cap in re.captures_iter(&input_line) {
             label = cap[1].to_string();
             perc = cap[2].parse().expect("String captured from regex Not int.");
@@ -124,7 +132,16 @@ fn main() {
         if !bars_map.contains_key(&label) {
             let pb = multi_bars.add(ProgressBar::new(100));
             pb.set_style(sty.clone());
-            pb.set_prefix(label.clone());
+            // label.truncate(args.name_len)
+            if label.len() > args.name_len {
+                pb.set_prefix(format!(
+                    "{}…{}",
+                    &label[..args.name_len - 3],
+                    &label[(label.len() - 2)..]
+                ));
+            } else {
+                pb.set_prefix(label.clone());
+            }
             pb.tick();
             let vp: VinaProgress = VinaProgress::new(label.clone(), max_id as usize, pb);
             bars_map.insert(label.clone(), vp);
@@ -170,6 +187,8 @@ fn receive_signals(args: &Cli) -> Result<(), rustbus::connection::Error> {
         .unwrap()
         .write_all()
         .unwrap();
+
+    let re = Regex::new(&args.filter).unwrap();
     loop {
         let message = con.recv.get_next_message(Timeout::Infinite)?;
         if let Some(s) = message.dynheader.interface {
@@ -177,6 +196,9 @@ fn receive_signals(args: &Cli) -> Result<(), rustbus::connection::Error> {
                 let mut parser = message.body.parser();
                 let pid = parser.get::<u32>().unwrap();
                 let label = parser.get::<String>().unwrap();
+                if !re.is_match(&label) {
+                    continue;
+                }
                 let _id = parser.get::<u32>().unwrap();
                 let perc = parser.get::<u8>().unwrap();
                 if args.id {
