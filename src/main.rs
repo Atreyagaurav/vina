@@ -27,6 +27,9 @@ struct Cli {
     /// Receive the dbus signal and print it
     #[clap(short, long)]
     receive: bool,
+    /// Show pid of the signal's origin
+    #[clap(short, long)]
+    id: bool,
     /// Do not print anything
     #[clap(short, long, action)]
     quiet: bool, // not implemented
@@ -65,7 +68,7 @@ impl VinaProgress {
 fn main() {
     let args = Cli::parse();
     if args.receive {
-        receive_signals().unwrap();
+        receive_signals(&args).unwrap();
         return;
     }
 
@@ -156,7 +159,7 @@ fn main() {
     }
 }
 
-fn receive_signals() -> Result<(), rustbus::connection::Error> {
+fn receive_signals(args: &Cli) -> Result<(), rustbus::connection::Error> {
     let session_path = get_session_bus_path()?;
     let mut con: DuplexConn = DuplexConn::connect_to_bus(session_path, true)?;
     // "type='signal',interface='dmon.Type'"
@@ -176,7 +179,11 @@ fn receive_signals() -> Result<(), rustbus::connection::Error> {
                 let label = parser.get::<String>().unwrap();
                 let _id = parser.get::<u32>().unwrap();
                 let perc = parser.get::<u8>().unwrap();
-                println!("{}_{}: {}", label, pid, perc);
+                if args.id {
+                    println!("{}_{}: {}", label, pid, perc);
+                } else {
+                    println!("{}: {}", label, perc);
+                }
             }
         }
     }
