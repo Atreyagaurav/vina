@@ -2,7 +2,9 @@ use chrono::Local;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use rustbus::{connection::Timeout, get_session_bus_path, DuplexConn, MessageBuilder};
+use rustbus::{
+    connection::Timeout, get_session_bus_path, standard_messages, DuplexConn, MessageBuilder,
+};
 use std::collections::HashMap;
 use std::io;
 use std::thread;
@@ -17,25 +19,65 @@ struct Cli {
     #[clap(short, long, default_value_t = 12)]
     name_len: u64,
     /// Match Pattern as Regex Expression
-    #[clap(short, long, default_value = r"(\w+) *: *(\d+)%?")]
+    #[clap(short, long, default_value = r"^(\w+) *: *(\d+)%?")]
     pattern: String,
     /// Dbus path to send the signal
     #[clap(short, long, default_value = "")]
     dbus_path: String,
+    /// Receive the dbus signal and print it
+    #[clap(short, long)]
+    receive: bool,
     /// Do not print anything
     #[clap(short, long, action)]
     quiet: bool, // not implemented
 }
 
+struct VinaProgress {
+    pid: u32,
+    label: String,
+    bar_id: usize,
+    bar_obj: ProgressBar,
+    percentage: u8,
+}
+
+impl VinaProgress {
+    fn new(label: String, bar_id: usize, bar_obj: ProgressBar) -> Self {
+        Self {
+            pid: std::process::id(),
+            label,
+            bar_id,
+            bar_obj,
+            percentage: 0,
+        }
+    }
+
+    fn send_signal(&self, dbus_path: &str, conn: &mut DuplexConn) {
+        let mut sig = MessageBuilder::new()
+            .signal("dmon.Type", "Report", dbus_path)
+            .build();
+        sig.body
+            .push_param4(&self.pid, &self.label, self.bar_id as u32, &self.percentage)
+            .unwrap();
+        conn.send.send_message(&sig).unwrap().write_all().unwrap();
+    }
+}
+
 fn main() {
     let args = Cli::parse();
+    if args.receive {
+        receive_signals().unwrap();
+        return;
+    }
+
     let mut con: Option<DuplexConn> = None;
     if !args.dbus_path.is_empty() {
         // open Dbus connection here.
         println!("Reporting to: {}", args.dbus_path);
         let session_path = get_session_bus_path().unwrap();
         let mut c = DuplexConn::connect_to_bus(session_path, true).unwrap();
-        // Dont forget to send the obligatory hello message. send_hello wraps the call and parses the response for convenience.
+        // Dont forget to send the obligatory hello
+        // message. send_hello wraps the call and parses the response
+        // for convenience.
         let _unique_name: String = c.send_hello(Timeout::Infinite).unwrap();
         con = Some(c);
     }
@@ -52,8 +94,8 @@ fn main() {
         .unwrap();
 
     let multi_bars = indicatif::MultiProgress::new();
-    let mut bars_map: HashMap<String, (u32, ProgressBar)> = HashMap::new();
-    let mut pbar: &(u32, ProgressBar);
+    let mut bars_map: HashMap<String, VinaProgress> = HashMap::new();
+    let mut vp: &mut VinaProgress;
 
     let mut label = String::from("");
     let mut perc: u8 = 0;
@@ -73,9 +115,7 @@ fn main() {
         }
         for cap in re.captures_iter(&input_line) {
             label = cap[1].to_string();
-            perc = cap[2]
-                .parse()
-                .expect("Not int; need to break when this happens.");
+            perc = cap[2].parse().expect("String captured from regex Not int.");
         }
 
         if !bars_map.contains_key(&label) {
@@ -83,23 +123,21 @@ fn main() {
             pb.set_style(sty.clone());
             pb.set_prefix(label.clone());
             pb.tick();
-            bars_map.insert(label.clone(), (max_id, pb));
+            let vp: VinaProgress = VinaProgress::new(label.clone(), max_id as usize, pb);
+            bars_map.insert(label.clone(), vp);
             max_id += 1;
         }
-        pbar = bars_map.get(&label).unwrap();
-        pbar.1.set_position(perc as u64);
+        vp = bars_map.get_mut(&label).unwrap();
+        vp.percentage = perc;
+        vp.bar_obj.set_position(perc as u64);
         if perc >= 100 {
             now = Local::now();
-            pbar.1
+            vp.bar_obj
                 .finish_with_message(format!("Done {}", now.format("%m/%d %H:%M:%S")));
         }
         match con {
             Some(ref mut c) => {
-                let mut sig = MessageBuilder::new()
-                    .signal("dmon.Type", "Report", &args.dbus_path)
-                    .build();
-                sig.body.push_param3(&label, pbar.0, &perc).unwrap();
-                c.send.send_message(&sig).unwrap().write_all().unwrap();
+                vp.send_signal(&args.dbus_path, c);
             }
             None => (),
         }
@@ -110,9 +148,36 @@ fn main() {
 
     now = Local::now();
     for pb in bars_map.values() {
-        if !pb.1.is_finished() {
-            pb.1.set_message(format!("Abandoned {}", now.format("%m/%d %H:%M:%S")));
-            pb.1.abandon();
+        if !pb.bar_obj.is_finished() {
+            pb.bar_obj
+                .set_message(format!("Abandoned {}", now.format("%m/%d %H:%M:%S")));
+            pb.bar_obj.abandon();
+        }
+    }
+}
+
+fn receive_signals() -> Result<(), rustbus::connection::Error> {
+    let session_path = get_session_bus_path()?;
+    let mut con: DuplexConn = DuplexConn::connect_to_bus(session_path, true)?;
+    // "type='signal',interface='dmon.Type'"
+    let _unique_name: String = con.send_hello(Timeout::Infinite)?;
+    let listen_msg = standard_messages::add_match("type='signal',interface='dmon.Type'".into());
+    con.send
+        .send_message(&listen_msg)
+        .unwrap()
+        .write_all()
+        .unwrap();
+    loop {
+        let message = con.recv.get_next_message(Timeout::Infinite)?;
+        if let Some(s) = message.dynheader.interface {
+            if s.contains("dmon.Type") {
+                let mut parser = message.body.parser();
+                let pid = parser.get::<u32>().unwrap();
+                let label = parser.get::<String>().unwrap();
+                let _id = parser.get::<u32>().unwrap();
+                let perc = parser.get::<u8>().unwrap();
+                println!("{}_{}: {}", label, pid, perc);
+            }
         }
     }
 }
