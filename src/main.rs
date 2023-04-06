@@ -43,7 +43,117 @@ struct VinaProgress {
     label: String,
     bar_id: usize,
     bar_obj: ProgressBar,
-    percentage: u8,
+    percentage: u16,
+}
+
+struct ProgressLine {
+    pid: Option<u32>,
+    label: String,
+    percentage: u16,
+}
+
+trait Progress {
+    fn next(&mut self) -> Option<ProgressLine>;
+}
+
+struct StdIn {
+    pattern: Regex,
+}
+
+impl StdIn {
+    fn new(pattern: &str) -> Self {
+        let re = Regex::new(&pattern).unwrap();
+        Self { pattern: re }
+    }
+}
+
+struct DbusInput {
+    connection: DuplexConn,
+    pattern: Regex,
+    id: bool,
+}
+
+impl DbusInput {
+    fn new(pattern: &str, id: bool) -> Result<Self, rustbus::connection::Error> {
+        let session_path = get_session_bus_path()?;
+        let mut con: DuplexConn = DuplexConn::connect_to_bus(session_path, true)?;
+        // "type='signal',interface='dmon.Type'"
+        let _unique_name: String = con.send_hello(Timeout::Infinite)?;
+        let listen_msg = standard_messages::add_match("type='signal',interface='dmon.Type'".into());
+        con.send
+            .send_message(&listen_msg)
+            .unwrap()
+            .write_all()
+            .unwrap();
+        let re = Regex::new(&pattern).unwrap();
+        Ok(Self {
+            connection: con,
+            pattern: re,
+            id,
+        })
+    }
+}
+
+impl Progress for StdIn {
+    fn next(&mut self) -> Option<ProgressLine> {
+        let mut input_line = String::new();
+        loop {
+            let bytes = match io::stdin().read_line(&mut input_line) {
+                Ok(i) => i,
+                Err(e) => panic!("{}", e),
+            };
+            if bytes == 0 {
+                // EOF
+                return None;
+            }
+
+            if !self.pattern.is_match(&input_line) {
+                continue;
+            }
+            for cap in self.pattern.captures_iter(&input_line) {
+                let label: String = cap[1].to_string();
+                let perc: f64 = cap[2].parse().expect("String captured from regex Not int.");
+                let percentage: u16 = (perc * 100.0).floor() as u16;
+                return Some(ProgressLine {
+                    pid: None,
+                    label,
+                    percentage,
+                });
+            }
+        }
+    }
+}
+
+impl Progress for DbusInput {
+    fn next(&mut self) -> Option<ProgressLine> {
+        loop {
+            let message = self
+                .connection
+                .recv
+                .get_next_message(Timeout::Infinite)
+                .ok()?;
+            if let Some(s) = message.dynheader.interface {
+                if s.contains("dmon.Type") {
+                    let mut parser = message.body.parser();
+                    let pid = parser.get::<u32>().unwrap();
+                    let mut label = parser.get::<String>().unwrap();
+                    if !self.pattern.is_match(&label) {
+                        continue;
+                    }
+                    if self.id {
+                        label = format!("{}:{}", pid, label);
+                    }
+                    let _id = parser.get::<u32>().unwrap();
+                    let percentage = parser.get::<u16>().unwrap();
+                    return Some(ProgressLine {
+                        pid: Some(pid),
+                        label,
+                        percentage,
+                    });
+                }
+            }
+        }
+    }
 }
 
 impl VinaProgress {
@@ -68,26 +178,7 @@ impl VinaProgress {
     }
 }
 
-fn main() {
-    let args = Cli::parse();
-    if args.receive {
-        receive_signals(&args).unwrap();
-        return;
-    }
-
-    let mut con: Option<DuplexConn> = None;
-    if !args.dbus_path.is_empty() {
-        // open Dbus connection here.
-        println!("Reporting to: {}", args.dbus_path);
-        let session_path = get_session_bus_path().unwrap();
-        let mut c = DuplexConn::connect_to_bus(session_path, true).unwrap();
-        // Dont forget to send the obligatory hello
-        // message. send_hello wraps the call and parses the response
-        // for convenience.
-        let _unique_name: String = c.send_hello(Timeout::Infinite).unwrap();
-        con = Some(c);
-    }
-
+fn print_bars(args: &Cli, mut input: Box<dyn Progress>, mut con: Option<DuplexConn>) {
     let sty = ProgressStyle::default_bar()
         .template(&format!(
             "{}{}{}{}{}",
@@ -103,54 +194,31 @@ fn main() {
     let mut bars_map: HashMap<String, VinaProgress> = HashMap::new();
     let mut vp: &mut VinaProgress;
 
-    let mut label = String::from("");
-    let mut perc: u8 = 0;
-
     let mut now;
-    let mut input_line = String::new();
-    let re = Regex::new(&args.pattern).unwrap();
     let mut max_id: u32 = 0;
-    loop {
-        let bytes = match io::stdin().read_line(&mut input_line) {
-            Ok(i) => i,
-            Err(e) => panic!("{}", e),
-        };
-        if bytes == 0 {
-            // EOF
-            break;
-        }
-
-        if !re.is_match(&input_line) {
-            continue;
-        }
-
-        for cap in re.captures_iter(&input_line) {
-            label = cap[1].to_string();
-            perc = cap[2].parse().expect("String captured from regex Not int.");
-        }
-
-        if !bars_map.contains_key(&label) {
+    while let Some(progress) = input.next() {
+        if !bars_map.contains_key(&progress.label) {
             let pb = multi_bars.add(ProgressBar::new(100));
             pb.set_style(sty.clone());
             // label.truncate(args.name_len)
-            if label.len() > args.name_len {
+            if progress.label.len() > args.name_len {
                 pb.set_prefix(format!(
                     "{}…{}",
-                    &label[..args.name_len - 3],
-                    &label[(label.len() - 2)..]
+                    &progress.label[..args.name_len - 3],
+                    &progress.label[(progress.label.len() - 2)..]
                 ));
             } else {
-                pb.set_prefix(label.clone());
+                pb.set_prefix(progress.label.clone());
             }
             pb.tick();
-            let vp: VinaProgress = VinaProgress::new(label.clone(), max_id as usize, pb);
-            bars_map.insert(label.clone(), vp);
+            let vp: VinaProgress = VinaProgress::new(progress.label.clone(), max_id as usize, pb);
+            bars_map.insert(progress.label.clone(), vp);
             max_id += 1;
         }
-        vp = bars_map.get_mut(&label).unwrap();
-        vp.percentage = perc;
-        vp.bar_obj.set_position(perc as u64);
-        if perc >= 100 {
+        vp = bars_map.get_mut(&progress.label).unwrap();
+        vp.percentage = progress.percentage;
+        vp.bar_obj.set_position((vp.percentage / 100) as u64);
+        if vp.percentage >= 100_00 {
             now = Local::now();
             vp.bar_obj
                 .finish_with_message(format!("Done {}", now.format("%m/%d %H:%M:%S")));
@@ -161,11 +229,8 @@ fn main() {
             }
             None => (),
         }
-
-        input_line.clear();
         thread::sleep(Duration::from_millis(5));
     }
-
     now = Local::now();
     for pb in bars_map.values() {
         if !pb.bar_obj.is_finished() {
@@ -176,37 +241,25 @@ fn main() {
     }
 }
 
-fn receive_signals(args: &Cli) -> Result<(), rustbus::connection::Error> {
-    let session_path = get_session_bus_path()?;
-    let mut con: DuplexConn = DuplexConn::connect_to_bus(session_path, true)?;
-    // "type='signal',interface='dmon.Type'"
-    let _unique_name: String = con.send_hello(Timeout::Infinite)?;
-    let listen_msg = standard_messages::add_match("type='signal',interface='dmon.Type'".into());
-    con.send
-        .send_message(&listen_msg)
-        .unwrap()
-        .write_all()
-        .unwrap();
-
-    let re = Regex::new(&args.filter).unwrap();
-    loop {
-        let message = con.recv.get_next_message(Timeout::Infinite)?;
-        if let Some(s) = message.dynheader.interface {
-            if s.contains("dmon.Type") {
-                let mut parser = message.body.parser();
-                let pid = parser.get::<u32>().unwrap();
-                let label = parser.get::<String>().unwrap();
-                if !re.is_match(&label) {
-                    continue;
-                }
-                let _id = parser.get::<u32>().unwrap();
-                let perc = parser.get::<u8>().unwrap();
-                if args.id {
-                    println!("{}_{}: {}", label, pid, perc);
-                } else {
-                    println!("{}: {}", label, perc);
-                }
-            }
-        }
+fn main() {
+    let args = Cli::parse();
+    if args.receive {
+        let input = DbusInput::new(&args.filter, args.id).unwrap();
+        print_bars(&args, Box::new(input), None);
+        return;
     }
+
+    let mut con: Option<DuplexConn> = None;
+    if !args.dbus_path.is_empty() {
+        // open Dbus connection here.
+        println!("Reporting to: {}", args.dbus_path);
+        let session_path = get_session_bus_path().unwrap();
+        let mut c = DuplexConn::connect_to_bus(session_path, true).unwrap();
+        // Dont forget to send the obligatory hello
+        // message. send_hello wraps the call and parses the response
+        // for convenience.
+        let _unique_name: String = c.send_hello(Timeout::Infinite).unwrap();
+        con = Some(c);
+    }
+    print_bars(&args, Box::new(StdIn::new(&args.pattern)), con);
 }

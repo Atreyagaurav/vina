@@ -14,11 +14,10 @@ import time
 
 def main():
     for i in range(110):
-        if i == 50:
-            time.sleep(1)
+        time.sleep(0.1)
         print(f"Nice: {i}", flush=True)
         print(f"What: {i//2}", flush=True)
-    time.sleep(3)
+    time.sleep(1)
 
 
 if __name__ == '__main__':
