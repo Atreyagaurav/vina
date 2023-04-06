@@ -27,6 +27,9 @@ struct Cli {
     /// Receive the dbus signal and print it
     #[clap(short, long)]
     receive: bool,
+    /// Echo all unmatched lines
+    #[clap(short, long)]
+    echo: bool,
     /// Filter the received dbus signals to matched labels
     #[clap(short, long, default_value = ".*")]
     filter: String,
@@ -56,25 +59,34 @@ trait Progress {
     fn next(&mut self) -> Option<ProgressLine>;
 }
 
-struct StdIn {
+struct StdIn<'a> {
     pattern: Regex,
+    mp_bar: Option<&'a indicatif::MultiProgress>,
 }
 
-impl StdIn {
-    fn new(pattern: &str) -> Self {
+impl<'a> StdIn<'a> {
+    fn new(pattern: &str, mp_bar: Option<&'a indicatif::MultiProgress>) -> Self {
         let re = Regex::new(&pattern).unwrap();
-        Self { pattern: re }
+        Self {
+            pattern: re,
+            mp_bar,
+        }
     }
 }
 
-struct DbusInput {
+struct DbusInput<'a> {
     connection: DuplexConn,
     pattern: Regex,
     id: bool,
+    mp_bar: Option<&'a indicatif::MultiProgress>,
 }
 
-impl DbusInput {
-    fn new(pattern: &str, id: bool) -> Result<Self, rustbus::connection::Error> {
+impl<'a> DbusInput<'a> {
+    fn new(
+        pattern: &str,
+        id: bool,
+        mp_bar: Option<&'a indicatif::MultiProgress>,
+    ) -> Result<Self, rustbus::connection::Error> {
         let session_path = get_session_bus_path()?;
         let mut con: DuplexConn = DuplexConn::connect_to_bus(session_path, true)?;
         // "type='signal',interface='dmon.Type'"
@@ -90,11 +102,12 @@ impl DbusInput {
             connection: con,
             pattern: re,
             id,
+            mp_bar,
         })
     }
 }
 
-impl Progress for StdIn {
+impl<'a> Progress for StdIn<'a> {
     fn next(&mut self) -> Option<ProgressLine> {
         let mut input_line = String::new();
         loop {
@@ -108,6 +121,9 @@ impl Progress for StdIn {
             }
 
             if !self.pattern.is_match(&input_line) {
+                if let Some(mp_b) = self.mp_bar {
+                    mp_b.println(&input_line).ok();
+                }
                 continue;
             }
             for cap in self.pattern.captures_iter(&input_line) {
@@ -124,7 +140,7 @@ impl Progress for StdIn {
     }
 }
 
-impl Progress for DbusInput {
+impl<'a> Progress for DbusInput<'a> {
     fn next(&mut self) -> Option<ProgressLine> {
         loop {
             let message = self
@@ -137,14 +153,19 @@ impl Progress for DbusInput {
                     let mut parser = message.body.parser();
                     let pid = parser.get::<u32>().unwrap();
                     let mut label = parser.get::<String>().unwrap();
+                    let _id = parser.get::<u32>().unwrap();
+                    let percentage = parser.get::<u16>().unwrap();
                     if !self.pattern.is_match(&label) {
+                        if let Some(mp_bar) = self.mp_bar {
+                            mp_bar
+                                .println(format!("{}:{} {}", pid, label, percentage))
+                                .ok();
+                        }
                         continue;
                     }
                     if self.id {
                         label = format!("{}:{}", pid, label);
                     }
-                    let _id = parser.get::<u32>().unwrap();
-                    let percentage = parser.get::<u16>().unwrap();
                     return Some(ProgressLine {
                         pid: Some(pid),
                         label,
@@ -178,7 +199,12 @@ impl VinaProgress {
     }
 }
 
-fn print_bars(args: &Cli, mut input: Box<dyn Progress>, mut con: Option<DuplexConn>) {
+fn print_bars(
+    args: &Cli,
+    multi_bars: &indicatif::MultiProgress,
+    input: Box<&mut dyn Progress>,
+    mut con: Option<DuplexConn>,
+) {
     let sty = ProgressStyle::default_bar()
         .template(&format!(
             "{}{}{}{}{}",
@@ -190,7 +216,6 @@ fn print_bars(args: &Cli, mut input: Box<dyn Progress>, mut con: Option<DuplexCo
         ))
         .unwrap();
 
-    let multi_bars = indicatif::MultiProgress::new();
     let mut bars_map: HashMap<String, VinaProgress> = HashMap::new();
     let mut vp: &mut VinaProgress;
 
@@ -243,13 +268,15 @@ fn print_bars(args: &Cli, mut input: Box<dyn Progress>, mut con: Option<DuplexCo
 
 fn main() {
     let args = Cli::parse();
+    let multi_bars = indicatif::MultiProgress::new();
+    let multi_ref = if args.echo { Some(&multi_bars) } else { None };
     if args.receive {
-        let input = DbusInput::new(&args.filter, args.id).unwrap();
-        print_bars(&args, Box::new(input), None);
+        let mut input = DbusInput::new(&args.filter, args.id, multi_ref).unwrap();
+        print_bars(&args, &multi_bars, Box::new(&mut input), None);
         return;
     }
 
-    let mut con: Option<DuplexConn> = None;
+    let mut input = StdIn::new(&args.pattern, multi_ref);
     if !args.dbus_path.is_empty() {
         // open Dbus connection here.
         println!("Reporting to: {}", args.dbus_path);
@@ -259,7 +286,8 @@ fn main() {
         // message. send_hello wraps the call and parses the response
         // for convenience.
         let _unique_name: String = c.send_hello(Timeout::Infinite).unwrap();
-        con = Some(c);
+        print_bars(&args, &multi_bars, Box::new(&mut input), Some(c));
+    } else {
+        print_bars(&args, &multi_bars, Box::new(&mut input), None);
     }
-    print_bars(&args, Box::new(StdIn::new(&args.pattern)), con);
 }
