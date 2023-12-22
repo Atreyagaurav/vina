@@ -11,3 +11,4 @@ regex="1"
 indicatif="0.17"
 clap = { version = "3.0", features = ["derive"] }
 rustbus = "0.18.0"
+humantime = "2.1.0"

@@ -1,5 +1,6 @@
 use chrono::Local;
 use clap::Parser;
+use humantime::Duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use rustbus::{
@@ -8,7 +9,6 @@ use rustbus::{
 use std::collections::HashMap;
 use std::io;
 use std::thread;
-use std::time::Duration;
 
 #[derive(Parser)]
 struct Cli {
@@ -36,6 +36,9 @@ struct Cli {
     /// Show pid of the received signal's origin
     #[clap(short, long)]
     id: bool,
+    /// Duration to sleep between checking progress
+    #[clap(short, long, default_value = "0ms")]
+    sleep: Duration,
     /// Do not print anything
     #[clap(short, long, action)]
     quiet: bool, // not implemented
@@ -111,6 +114,7 @@ impl<'a> Progress for StdIn<'a> {
     fn next(&mut self) -> Option<ProgressLine> {
         let mut input_line = String::new();
         loop {
+            input_line.clear();
             let bytes = match io::stdin().read_line(&mut input_line) {
                 Ok(i) => i,
                 Err(e) => panic!("{}", e),
@@ -254,7 +258,7 @@ fn print_bars(
             }
             None => (),
         }
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(args.sleep.into());
     }
     now = Local::now();
     for pb in bars_map.values() {
